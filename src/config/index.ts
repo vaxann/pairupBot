@@ -3,7 +3,7 @@ import path from "path"
 
 nconf.argv()
      .env()
-     //.file({file: '/etc/stub_bot/config.json'});
-     .file({ file: path.join(__dirname, 'config.json') });
+     .file({file: '/etc/pairup_bot/config.json'});
+     //.file({ file: path.join(__dirname, 'config.json') });
 
 export default nconf;
