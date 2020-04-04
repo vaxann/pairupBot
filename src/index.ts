@@ -19,7 +19,7 @@ import Log from "./log";
 const log = Log(module);
 
 enum ActionType {
-    imin, cancel, results
+    imin, cancel, results, delivered
 }
 
 //TODO: add config validation
@@ -46,9 +46,9 @@ bot.onText(/^\/pairup\s+([^]+)/, (msg, match)=>{
     // send to Chat
     bot.sendMessage(msg.chat.id, __buildPairingText(pairingWelcome, members,false), __buildButtonsSend(guid,false))
         .then((new_msg)=>{
-            const data:Db.IPairingData = {pairingWelcome: pairingWelcome, members :members, message:new_msg};
+            const data:Db.IPairingData = {pairingWelcome: pairingWelcome, members :members, message:new_msg, isFinished:false};
 
-            Db.saveNewSession(guid, data,(err) => {
+            Db.saveSession(guid, data,(err) => {
                 if (err) return log.error(err);
                 if (!msg.from || !msg.from.id) return log.error(new Error('Error with Telegram'));
 
@@ -92,6 +92,10 @@ bot.on('callback_query', (query) => {
             __showResults(guid, msg);
             break;
         }
+        case ActionType.delivered:{
+            __updateDeliveredStatus(guid, user, msg);
+            break;
+        }
     }
 });
 
@@ -109,19 +113,30 @@ function __showResults(guid: string, msg:Message):void {
         if (!lastMember) return Error("No last member");
 
         async.reduce(random, lastMember,
-            (memo, member, callbak:(err?:Error|null, memo?:User)=>void) => {
-                if (!memo) return callbak(new Error("Can't find pair"));
+            (memo, member, callback:(err?:Error|null, memo?:Db.UserWithStatus)=>void) => {
+                if (!memo) return callback(new Error("Can't find pair"));
 
-                sendOrStore(bot, member.id, __buildResultText(data.pairingWelcome, memo), {parse_mode: 'HTML'}, (err) =>{
-                    if (err) return callbak(err);
+                data.members = _.map(data.members, (m)=>{
+                    if(m.id === member.id)
+                        m.pair = memo;
 
-                    callbak(null, member);
+                    return m;
+                });
+
+                sendOrStore(bot, member.id, __buildResultText(data.pairingWelcome, memo, false), __buildUserButton(guid,false), (err) =>{
+                    if (err) return callback(err);
+
+                    callback(null, member);
                 });
 
             },
             (err)=>{
                 if (err) return log.error(err);
-                log.debug("All pairs sent");
+                data.isFinished = true;
+                Db.saveSession(guid, data, (err)=>{
+                    if (err) return log.error(err);
+                    log.debug("All pairs sent");
+                });
             });
     });
 }
@@ -132,12 +147,57 @@ function __addUser(guid: string, user: TelegramBot.User, msg: TelegramBot.Messag
         if (err) return log.error(err);
         if (!data) return log.error("Error no Session Data");
 
-        bot.editMessageText(__buildPairingText(data.pairingWelcome, data.members,false), __buildButtonsEdit(guid, msg,false));
+        bot.editMessageText(__buildPairingText(data.pairingWelcome, data.members, data.isFinished),
+            __buildButtonsEdit(guid, msg,data.isFinished));
 
         sendOrStore(bot, user.id, __buildUserText(data.pairingWelcome));
     });
 }
 
+function __updateDeliveredStatus(guid: string, user: User, msg:Message):void {
+    if (msg.from && msg.chat.id !== user.id) return;
+    Db.updateUserStatus(guid, user, (err, data)=>{
+        if (err) return log.error(err);
+        if (!data) return log.error("Error no Session Data");
+
+        bot.editMessageText(__buildPairingText(data.pairingWelcome, data.members, data.isFinished),
+            __buildButtonsEdit(guid, msg, data.isFinished));
+
+        const userEx = _.find(data.members, (m)=>{return m.id == user.id});
+        if (!userEx || !userEx.pair) return;
+
+        bot.editMessageText(__buildResultText(data.pairingWelcome, userEx.pair, true),
+            __buildUserButtonEdit(guid, msg, true));
+    });
+}
+
+
+function __buildUserButtonEdit(guid: string, msg:Message, isDelivered:boolean):EditMessageTextOptions {
+    const options:EditMessageTextOptions = <EditMessageTextOptions>__buildUserButton(guid, isDelivered);
+
+    options.chat_id = msg.chat.id;
+    options.message_id = msg.message_id;
+
+    return options;
+}
+
+function __buildUserButton(guid: string, isDelivered:boolean):SendMessageOptions {
+    let inline_keyboard:InlineKeyboardButton[][] = [];
+
+    if(!isDelivered) {
+        inline_keyboard = [[{
+            text: "Подтвердить",
+            callback_data: "delivered|" + guid
+        }]];
+    }
+
+    return {
+        parse_mode: 'HTML',
+        reply_markup: {
+            inline_keyboard: inline_keyboard
+        }
+    };
+}
 
 function __buildButtonsSend(guid:string, isFinished:boolean):SendMessageOptions {
     return __buildButtons(guid, isFinished);
@@ -199,14 +259,15 @@ function __buildAdminButtons(guid:string, isFinished:boolean):SendMessageOptions
 }
 
 
-function __buildResultText(pairingWelcome: string, member: User) {
-    return `Результат распредления для "${pairingWelcome}", ваша пара:\n  - ${__userToText(member)}`;
+function __buildResultText(pairingWelcome: string, member: User, status:boolean) {
+    const deliveryText = (!status)?'\n\nПодтвердите получение, пожалуйста!':'';
+    return `Результат распредления для "${pairingWelcome}", ваша пара:\n  - ${__userToText(member)}${deliveryText}`;
 }
 
-function __buildPairingText(pairingWelcome: string, members: Array<User>, isFinished:boolean) : string {
+function __buildPairingText(pairingWelcome: string, members: Array<Db.UserWithStatus>, isFinished:boolean) : string {
     const users = _
             .chain(members)
-            .map((m)=>{return '  - '+ __userToText(m)})
+            .map((m)=>{return `  ${(m.delivered)?'+':'-'} ${__userToText(m)}`})
             .join('\n')
             .value();
 

@@ -24,12 +24,17 @@ export interface IMessageStorage {
     options?:SendMessageOptions
 }
 
-export interface IPairingData {
-    pairingWelcome : string,
-    members : Array<User>,
-    message : Message
+export interface UserWithStatus extends User {
+    delivered?:boolean,
+    pair?:User
 }
 
+export interface IPairingData {
+    pairingWelcome : string,
+    members : Array<UserWithStatus>,
+    message : Message,
+    isFinished: boolean
+}
 
 export class ExistMemberError extends Error {
     user:User;
@@ -40,7 +45,7 @@ export class ExistMemberError extends Error {
     }
 }
 
-export function saveNewSession(guid: string, data:IPairingData, callback:(err?:Error|null)=>void):void {
+export function saveSession(guid: string, data:IPairingData, callback:(err?:Error|null)=>void):void {
     ParsSession.put(guid, data, (err: Error)=>{
         if (err) return callback(err);
 
@@ -65,6 +70,26 @@ export function addUserToSession(guid:string, user:User, callback:(err?:Error|nu
             return callback(new ExistMemberError("User already member", user));
 
         data.members.push(user);
+
+        ParsSession.put(guid, data, (err: Error)=>{
+            if (err) return callback(err);
+
+            callback(null, data);
+        });
+    });
+}
+
+export function updateUserStatus(guid:string, user:User, callback:(err?:Error|null,data?:IPairingData)=>void):void {
+    loadSession(guid, (err, data)=>{
+        if (err) return callback(err);
+        if (!data) return callback(new Error('No Data'));
+
+        data.members = _.map(data.members, (m)=>{
+            if (m.id === user.id)
+                m.delivered = true;
+
+            return m;
+        });
 
         ParsSession.put(guid, data, (err: Error)=>{
             if (err) return callback(err);
